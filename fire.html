@@ -1,53 +1,170 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Arduino Sensor Dashboard</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Firefighter Sensor Dashboard</title>
+
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-app.js";
-    import { getDatabase, ref, onValue } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-database.js";
+    import {
+      getDatabase,
+      ref,
+      onValue,
+      set,
+      update,
+      get
+    } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-database.js";
 
     const firebaseConfig = {
-      apiKey: "YOUR_REAL_API_KEY_HERE",
       databaseURL: "https://firefighter-497b0-default-rtdb.firebaseio.com"
     };
 
     const app = initializeApp(firebaseConfig);
     const db = getDatabase(app);
-    let currentDevice = 'Arduino1';  // Default device
 
-    // Listen for updates from Firebase
+    let currentDevice = null;
+    let currentDeviceRef = null;
+    let currentDeviceListener = null;
+
+    async function loadDevices() {
+      const devicesRef = ref(db, 'devices');
+      const snapshot = await get(devicesRef);
+      const deviceSelector = document.getElementById('deviceSelector');
+      deviceSelector.innerHTML = "";
+
+      if (snapshot.exists()) {
+        const devicesData = snapshot.val();
+        Object.keys(devicesData).forEach((deviceKey) => {
+          const option = document.createElement('option');
+          option.value = deviceKey;
+          option.textContent = deviceKey;
+          deviceSelector.appendChild(option);
+        });
+        if (Object.keys(devicesData).length > 0) {
+          changeDevice(Object.keys(devicesData)[0]);
+        }
+      } else {
+        const option = document.createElement('option');
+        option.value = "";
+        option.textContent = "No firefighters found";
+        deviceSelector.appendChild(option);
+        clearDashboard();
+      }
+    }
+
+    function clearDashboard() {
+      document.getElementById('gas').innerText = '-';
+      document.getElementById('temperature').innerText = '-';
+      document.getElementById('humidity').innerText = '-';
+      document.getElementById('timestamp').innerText = '-';
+      document.getElementById('gasLed').className = 'led off';
+      document.getElementById('buzzerLed').className = 'led off';
+    }
+
     function listenForUpdates() {
-      const deviceRef = ref(db, currentDevice);
-      onValue(deviceRef, (snapshot) => {
+      if (currentDeviceListener) {
+        currentDeviceListener();
+        currentDeviceListener = null;
+      }
+      if (!currentDevice) return;
+
+      currentDeviceRef = ref(db, currentDevice);
+      currentDeviceListener = onValue(currentDeviceRef, (snapshot) => {
         const data = snapshot.val();
         if (data) {
-          document.getElementById('gas').innerText = `${data.gas ?? '-'} ppm`;
-          document.getElementById('temperature').innerText = `${data.temperature ?? '-'}`;
-          document.getElementById('humidity').innerText = `${data.humidity ?? '-'}`;
-          document.getElementById('timestamp').innerText = data.timestamp
-            ? new Date(data.timestamp * 1000).toLocaleTimeString('en-AU', {
+          document.getElementById('gas').innerText = data.gas !== undefined ? `${data.gas} ppm` : '-';
+          document.getElementById('temperature').innerText = data.temperature !== undefined ? `${data.temperature} °C` : '-';
+          document.getElementById('humidity').innerText = data.humidity !== undefined ? `${data.humidity} %` : '-';
+          document.getElementById('timestamp').innerText = data.timestamp && !isNaN(data.timestamp) && data.timestamp > 0
+            ? new Date(data.timestamp * 1000).toLocaleString('en-AU', {
                 timeZone: 'Australia/Melbourne',
-                hour: '2-digit', minute: '2-digit', second: '2-digit'
+                dateStyle: 'short',
+                timeStyle: 'medium'
               })
-            : '-';
+            : 'No valid timestamp';
 
-          // Update LED indicators based on gas level
-          document.getElementById('gasLed').className = 'led ' + (data.gas > 200 ? 'on' : 'off');
-          document.getElementById('buzzerLed').className = 'led ' + (data.gas > 250 ? 'on' : 'off');
+          const gasLedState = data.ledGas === 1 || (data.gas > 400 && data.ledGas !== 0);
+          const buzzerLedState = data.ledTemp === 1 || (data.temperature > 30 && data.ledTemp !== 0);
+
+          document.getElementById('gasLed').className = 'led ' + (gasLedState ? 'on' : 'off');
+          document.getElementById('buzzerLed').className = 'led ' + (buzzerLedState ? 'on' : 'off');
+
+          updateToggleButton('ledGas', gasLedState);
+          updateToggleButton('ledTemp', buzzerLedState);
+        } else {
+          clearDashboard();
         }
+      }, (error) => {
+        console.error('Firebase onValue error:', error);
+        clearDashboard();
       });
     }
 
-    // Change the device and start listening for updates
     window.changeDevice = function(deviceId) {
       currentDevice = deviceId;
       listenForUpdates();
+    };
+
+    window.toggleLED = async function(ledKey) {
+      if (!currentDevice) return alert("Select a firefighter device first");
+
+      const ledRef = ref(db, `${currentDevice}/${ledKey}`);
+      const snapshot = await get(ledRef);
+      const currentState = snapshot.exists() ? snapshot.val() : 0;
+      const newState = currentState === 1 ? 0 : 1;
+
+      try {
+        await set(ledRef, newState);
+      } catch (error) {
+        alert('Failed to toggle LED: ' + error.message);
+      }
+    };
+
+    function updateToggleButton(ledId, isOn) {
+      const btnId = ledId === 'ledGas' ? 'btnToggleGas' : 'btnToggleTemp';
+      const btn = document.getElementById(btnId);
+      if (btn) {
+        btn.textContent = isOn ? `Turn ${ledId === 'ledGas' ? 'Gas' : 'Temp/Buzzer'} LED Off` : `Turn ${ledId === 'ledGas' ? 'Gas' : 'Temp/Buzzer'} LED On`;
+      }
     }
 
-    // Initial call to load data for the default device (Arduino1)
-    listenForUpdates();
+    window.addFirefighter = async function() {
+      const nameInput = document.getElementById('newFirefighterName');
+      const newName = nameInput.value.trim();
+
+      if (!newName) return alert("Please enter a firefighter/device name");
+
+      const deviceRef = ref(db, `devices/${newName}`);
+      const snapshot = await get(deviceRef);
+      if (snapshot.exists()) {
+        alert("This firefighter/device already exists!");
+        return;
+      }
+
+      try {
+        const updates = {};
+        updates[`devices/${newName}`] = true;
+        updates[`${newName}/gas`] = 0;
+        updates[`${newName}/temperature`] = 0;
+        updates[`${newName}/humidity`] = 0;
+        updates[`${newName}/timestamp`] = Math.floor(Date.now() / 1000);
+        updates[`${newName}/ledGas`] = 0;
+        updates[`${newName}/ledTemp`] = 0;
+        updates[`${newName}/buzzer`] = false;
+
+        await update(ref(db), updates);
+
+        await loadDevices();
+        document.getElementById('deviceSelector').value = newName;
+        changeDevice(newName);
+        nameInput.value = '';
+      } catch (error) {
+        alert('Failed to add firefighter/device: ' + error.message);
+      }
+    };
+
+    window.onload = loadDevices;
   </script>
 
   <style>
@@ -55,165 +172,153 @@
       font-family: 'Arial', sans-serif;
       background: linear-gradient(135deg, #84fab0 0%, #8fd3f4 100%);
       margin: 0;
-      padding: 0;
+      padding: 20px;
       color: #333;
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
-      height: 100vh;
+      min-height: 100vh;
     }
 
     h2 {
       font-size: 2.5rem;
-      color: #fff;
+      color: black;
       text-align: center;
       margin-bottom: 30px;
       animation: fadeIn 2s ease-in-out;
     }
 
-    label, select {
+    .container {
+      background: rgba(255, 255, 255, 0.9);
+      border-radius: 12px;
+      padding: 20px;
+      max-width: 600px;
+      width: 100%;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+      text-align: center;
+    }
+
+    label, select, input {
       font-size: 1.2rem;
       padding: 10px;
       background-color: rgba(255, 255, 255, 0.8);
       border: 1px solid #ccc;
       border-radius: 8px;
-      margin-bottom: 20px;
-      display: block;
-      text-align: center;
-      cursor: pointer;
+      margin: 10px 0;
+      width: 220px;
+      max-width: 90%;
+      box-sizing: border-box;
       transition: background-color 0.3s ease;
     }
 
-    label {
-      color: #333;
-    }
-
-    select {
-      width: 200px;
-      font-size: 1.1rem;
-    }
-
-    select:hover, label:hover {
+    select:hover, input:hover {
       background-color: rgba(255, 255, 255, 1);
     }
 
-    .dashboard {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 20px;
-      max-width: 1000px;
-      width: 90%;
-      margin: 0 auto;
-      animation: slideUp 1.5s ease-out;
+    .btn {
+      background-color: #007bff;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 8px;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: background-color 0.3s ease;
+      margin: 5px;
     }
 
-    .card {
-      background: white;
-      padding: 30px;
-      border-radius: 15px;
-      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
-      text-align: center;
-      transition: transform 0.3s ease-in-out;
+    .btn:hover {
+      background-color: #0056b3;
     }
 
-    .card:hover {
-      transform: scale(1.05);
+    .sensor {
+      margin: 20px 0;
+      font-size: 1.1rem;
     }
 
-    .card h3 {
-      margin-top: 0;
-      color: #4CAF50;
-      font-size: 1.8rem;
-      margin-bottom: 15px;
+    .sensor div {
+      margin: 10px 0;
+    }
+
+    .led-container {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 15px 0;
     }
 
     .led {
-      width: 30px;
-      height: 30px;
+      height: 24px;
+      width: 24px;
       border-radius: 50%;
-      margin-left: 10px;
       display: inline-block;
-      transition: background-color 0.3s ease;
+      margin: 0 10px;
+      box-shadow: 0 0 4px rgba(0, 0, 0, 0.2);
     }
 
-    .led.on { background-color: #4CAF50; }
-    .led.off { background-color: #f44336; }
+    .led.on {
+      background-color: #ff0000;
+      box-shadow: 0 0 8px rgba(255, 0, 0, 0.6);
+    }
 
-    .leds-container {
+    .led.off {
+      background-color: #666;
+    }
+
+    .add-firefighter {
       display: flex;
       justify-content: center;
       align-items: center;
+      gap: 10px;
     }
 
-    button {
-      background-color: #4CAF50;
-      color: white;
-      border: none;
-      padding: 12px 20px;
-      border-radius: 8px;
-      cursor: pointer;
-      font-size: 1.1rem;
-      margin: 10px;
-      transition: background-color 0.2s ease-in-out;
-    }
-
-    button:hover {
-      background-color: #45a049;
-    }
-
-    .center {
-      text-align: center;
-    }
-
-    .emoji {
-      font-size: 2.5rem;
+    @media (max-width: 500px) {
+      h2 {
+        font-size: 2rem;
+      }
+      label, select, input, .btn {
+        width: 100%;
+        font-size: 1rem;
+      }
+      .add-firefighter {
+        flex-direction: column;
+      }
     }
 
     @keyframes fadeIn {
-      from { opacity: 0; }
-      to { opacity: 1; }
-    }
-
-    @keyframes slideUp {
-      from { transform: translateY(20px); opacity: 0; }
-      to { transform: translateY(0); opacity: 1; }
-    }
-
-    @media (max-width: 768px) {
-      .dashboard {
-        grid-template-columns: 1fr;
-      }
+      0% { opacity: 0; transform: translateY(-20px); }
+      100% { opacity: 1; transform: translateY(0); }
     }
   </style>
 </head>
 <body>
-  <h2>Arduino Sensor Dashboard</h2>
+  <div class="container">
+    <h2>🔥 Firefighter Sensor Dashboard</h2>
+    <label for="deviceSelector">Select Firefighter:</label>
+    <select id="deviceSelector" onchange="changeDevice(this.value)"></select>
 
-  <label>Select Device:
-    <select id="deviceSelector" onchange="changeDevice(this.value)">
-      <option value="Arduino1">Arduino1</option>
-      <option value="Arduino2">Arduino2</option>
-    </select>
-  </label>
-
-  <div class="dashboard">
-    <div class="card">
-      <h3>Sensor Readings <span class="emoji">📊</span></h3>
-      <p>Gas Level: <span id="gas">-</span></p>
-      <p>Temperature: <span id="temperature">-</span>°C</p>
-      <p>Humidity: <span id="humidity">-</span>%</p>
-      <p>Last Update: <span id="timestamp">-</span></p>
+    <div class="add-firefighter">
+      <input type="text" id="newFirefighterName" placeholder="Add new firefighter..." />
+      <button class="btn" onclick="addFirefighter()">➕ Add Firefighter</button>
     </div>
 
-    <div class="card">
-      <h3>Indicators <span class="emoji">🚨</span></h3>
-      <p>Gas Alert: <span class="led" id="gasLed"></span></p>
-      <p>Buzzer: <span class="led" id="buzzerLed"></span></p>
-      <div class="leds-container">
-        <button onclick="toggleLED('ledTemp')">Toggle Temp LED</button>
-        <button onclick="toggleLED('ledGas')">Toggle Gas LED</button>
-      </div>
+    <div class="sensor">
+      <div><strong>Gas:</strong> <span id="gas">-</span></div>
+      <div><strong>Temperature:</strong> <span id="temperature">-</span></div>
+      <div><strong>Humidity:</strong> <span id="humidity">-</span></div>
+      <div><strong>Timestamp:</strong> <span id="timestamp">-</span></div>
+    </div>
+
+    <div class="led-container">
+      <strong>Gas LED:</strong>
+      <span id="gasLed" class="led off"></span>
+      <button id="btnToggleGas" class="btn" onclick="toggleLED('ledGas')">Toggle Gas LED</button>
+    </div>
+
+    <div class="led-container">
+      <strong>Temp/Buzzer LED:</strong>
+      <span id="buzzerLed" class="led off"></span>
+      <button id="btnToggleTemp" class="btn" onclick="toggleLED('ledTemp')">Toggle Temp/Buzzer LED</button>
     </div>
   </div>
 </body>
